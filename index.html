@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>箱入り娘パズル</title>
+  <style>
+    body {
+      margin: 20px;
+      font-family: sans-serif;
+    }
+    h1 {
+      margin-bottom: 0.5em;
+    }
+    #board {
+      position: relative;
+      width: 400px;  /* 4列 × 100px */
+      height: 500px; /* 5行 × 100px */
+      border: 2px solid #333;
+      background-color: #F9F4EE;
+      box-sizing: border-box;
+    }
+    .cell {
+      position: absolute;
+      width: 100px;
+      height: 100px;
+      box-sizing: border-box;
+      border: 1px solid #ccc;
+    }
+    .piece {
+      position: absolute;
+      background-color: #CCF;
+      border: 2px solid #666;
+      box-sizing: border-box;
+      text-align: center;
+      font-weight: bold;
+      font-size: 20px;
+      line-height: 1.3;
+      cursor: pointer;
+      user-select: none;
+      transition: left 0.2s, top 0.2s;
+    }
+    .piece span {
+      position: relative;
+      top: 50%;
+      transform: translateY(-50%);
+      display: inline-block;
+    }
+    /* 選択中の駒は赤枠で表示 */
+    .selected {
+      border-color: red;
+    }
+  </style>
+</head>
+<body>
+<h1>箱入り娘パズル</h1>
+<p>
+  1. 駒をクリックして選択してください（選択中は赤枠で表示）。<br>
+  2. 選択した駒をドラッグし、上下左右の隣接セルへ移動させます。<br>
+  ※ ドラッグ方向の移動距離がセルサイズの半分以上の場合、その方向へ1マスの移動を試みます。<br>
+  娘(2×2)が下段中央（行3,列1～行4,列2）に来ればクリアです。
+</p>
+
+<div id="board"></div>
+
+<script>
+/* ------------------------------------------
+ * 1. 盤面・コマ情報の定義
+ * ------------------------------------------ */
+const ROWS = 5;
+const COLS = 4;
+const CELL_SIZE = 100; // px
+
+// 盤面：0は空き、1～10は駒ID
+// 1: 父親(縦2), 2: 母親(縦2), 3: 娘(2×2),
+// 4: 下男(縦2), 5: 下女(縦2), 6: 番頭(横2),
+// 7～10: 小僧(1×1)
+let board = [
+  [1,  3,  3,  2 ],
+  [1,  3,  3,  2 ],
+  [4,  6,  6,  5 ],
+  [4,  7,  8,  5 ],
+  [9,  0,  0, 10]
+];
+
+// 各駒の情報（サイズは [width, height] 単位）
+const pieceInfo = {
+  1: { name: '父親', size: [1,2] },
+  2: { name: '母親', size: [1,2] },
+  3: { name: '娘',   size: [2,2] },
+  4: { name: '下男', size: [1,2] },
+  5: { name: '下女', size: [1,2] },
+  6: { name: '番頭', size: [2,1] },
+  7: { name: '小僧', size: [1,1] },
+  8: { name: '小僧', size: [1,1] },
+  9: { name: '小僧', size: [1,1] },
+ 10: { name: '小僧', size: [1,1] }
+};
+
+// 各駒の左上座標（マス単位）を board 配列から抽出
+let piecePositions = {}; // { id: { x, y } }
+for (let y = 0; y < ROWS; y++) {
+  for (let x = 0; x < COLS; x++) {
+    const id = board[y][x];
+    if (id === 0) continue;
+    if (!piecePositions[id]) {
+      piecePositions[id] = { x, y };
+    }
+  }
+}
+
+/* ------------------------------------------
+ * 2. HTML要素生成：盤面のセル＆駒DIV
+ * ------------------------------------------ */
+const boardEl = document.getElementById('board');
+
+// 背景グリッドのセル作成（ドラッグ時のスナップ先判定用）
+for (let y = 0; y < ROWS; y++) {
+  for (let x = 0; x < COLS; x++) {
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    cell.style.left = (x * CELL_SIZE) + 'px';
+    cell.style.top  = (y * CELL_SIZE) + 'px';
+    // セルの座標をデータ属性に保持
+    cell.dataset.x = x;
+    cell.dataset.y = y;
+    boardEl.appendChild(cell);
+  }
+}
+
+// 駒DIVを生成
+const pieceElements = {}; // { id: HTMLDivElement }
+for (let id in pieceInfo) {
+  const div = document.createElement('div');
+  div.className = 'piece';
+  div.id = 'piece-' + id;
+
+  const nameSpan = document.createElement('span');
+  nameSpan.textContent = pieceInfo[id].name;
+  div.appendChild(nameSpan);
+
+  // 駒クリックで選択し、ドラッグ開始
+  div.addEventListener('mousedown', (e) => {
+    e.stopPropagation();
+    selectedId = parseInt(id, 10);
+    updateSelection();
+
+    draggingId = selectedId;
+    startMouseX = e.clientX;
+    startMouseY = e.clientY;
+    startLeft = parseInt(div.style.left, 10);
+    startTop = parseInt(div.style.top, 10);
+    originalX = piecePositions[draggingId].x;
+    originalY = piecePositions[draggingId].y;
+
+    // 移動判定のため、一時的にboardから自分自身を除外
+    clearBoardPiece(draggingId);
+
+    div.style.zIndex = 1000;
+  });
+  boardEl.appendChild(div);
+  pieceElements[id] = div;
+}
+
+/* ------------------------------------------
+ * 3. 盤面描画：各駒を配置
+ * ------------------------------------------ */
+function renderPieces() {
+  for (let id in pieceInfo) {
+    const pos = piecePositions[id];
+    const [w, h] = pieceInfo[id].size;
+    const el = pieceElements[id];
+    el.style.width = (w * CELL_SIZE) + 'px';
+    el.style.height = (h * CELL_SIZE) + 'px';
+    el.style.left = (pos.x * CELL_SIZE) + 'px';
+    el.style.top = (pos.y * CELL_SIZE) + 'px';
+  }
+}
+renderPieces();
+
+/* ------------------------------------------
+ * 4. 選択状態の更新
+ * ------------------------------------------ */
+let selectedId = null;
+function updateSelection() {
+  for (let id in pieceElements) {
+    pieceElements[id].classList.remove('selected');
+  }
+  if (selectedId !== null) {
+    pieceElements[selectedId].classList.add('selected');
+  }
+}
+
+/* ------------------------------------------
+ * 5. ドラッグ操作のためのグローバル変数
+ * ------------------------------------------ */
+let draggingId = null;
+let startMouseX = 0, startMouseY = 0;
+let startLeft = 0, startTop = 0;
+let originalX = 0, originalY = 0;
+const DRAG_THRESHOLD = CELL_SIZE / 2; // 50px以上のドラッグで移動と判断
+
+document.addEventListener('mousemove', (e) => {
+  if (draggingId === null) return;
+  const el = pieceElements[draggingId];
+  const dx = e.clientX - startMouseX;
+  const dy = e.clientY - startMouseY;
+  // 駒の位置をドラッグ量だけ移動
+  el.style.left = (startLeft + dx) + 'px';
+  el.style.top = (startTop + dy) + 'px';
+});
+
+document.addEventListener('mouseup', (e) => {
+  if (draggingId === null) return;
+  const el = pieceElements[draggingId];
+  // ドラッグ量を計算
+  const dx = e.clientX - startMouseX;
+  const dy = e.clientY - startMouseY;
+
+  let moveDx = 0, moveDy = 0;
+  // 横移動と縦移動のどちらが大きいか判定し、閾値以上なら1マス分の移動とする
+  if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) >= DRAG_THRESHOLD) {
+    moveDx = dx > 0 ? 1 : -1;
+  } else if (Math.abs(dy) >= DRAG_THRESHOLD) {
+    moveDy = dy > 0 ? 1 : -1;
+  }
+
+  // 駒の移動可能判定（隣接セルへの移動のみ）
+  if ((moveDx !== 0 || moveDy !== 0) && canMove(draggingId, moveDx, moveDy)) {
+    movePiece(draggingId, moveDx, moveDy);
+  } else {
+    // 移動不可の場合は元の位置に戻す（board状態は既に自分を除外しているため、再配置）
+    placeBoardPiece(draggingId, originalX, originalY);
+  }
+
+  // ドラッグ終了
+  el.style.zIndex = "";
+  draggingId = null;
+  renderPieces();
+  checkWin();
+});
+
+/* ------------------------------------------
+ * 6. board配列の更新用関数
+ * ------------------------------------------ */
+/**
+ * 指定IDの駒が占めるマスを board からクリアする
+ */
+function clearBoardPiece(id) {
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      if (board[y][x] === id) {
+        board[y][x] = 0;
+      }
+    }
+  }
+}
+
+/**
+ * 指定IDの駒を、(cellX, cellY)の左上に配置する
+ */
+function placeBoardPiece(id, cellX, cellY) {
+  const [w, h] = pieceInfo[id].size;
+  for (let yy = 0; yy < h; yy++) {
+    for (let xx = 0; xx < w; xx++) {
+      board[cellY + yy][cellX + xx] = id;
+    }
+  }
+}
+
+/* ------------------------------------------
+ * 7. 移動判定と実際の移動処理
+ * ------------------------------------------ */
+/**
+ * 指定の駒が(dx, dy)方向に1マス移動可能か判定
+ */
+function canMove(id, dx, dy) {
+  const { x, y } = piecePositions[id];
+  const [w, h] = pieceInfo[id].size;
+  for (let yy = y; yy < y + h; yy++) {
+    for (let xx = x; xx < x + w; xx++) {
+      const nx = xx + dx;
+      const ny = yy + dy;
+      if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS) return false;
+      const cellId = board[ny][nx];
+      if (cellId !== 0 && cellId !== id) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * 指定の駒を(dx, dy)方向に1マス移動し、boardとpiecePositionsを更新する
+ */
+function movePiece(id, dx, dy) {
+  const oldPos = piecePositions[id];
+  const [w, h] = pieceInfo[id].size;
+  // 現在の位置をboardからクリア
+  for (let yy = oldPos.y; yy < oldPos.y + h; yy++) {
+    for (let xx = oldPos.x; xx < oldPos.x + w; xx++) {
+      board[yy][xx] = 0;
+    }
+  }
+  // 新しい位置へ配置
+  const newPos = { x: oldPos.x + dx, y: oldPos.y + dy };
+  placeBoardPiece(id, newPos.x, newPos.y);
+  piecePositions[id] = newPos;
+}
+
+/* ------------------------------------------
+ * 8. 勝利判定
+ *    娘(ID=3)が下段中央（行3,列1～行4,列2）に来ればクリア
+ * ------------------------------------------ */
+function checkWin() {
+  const id = 3; // 娘
+  const pos = piecePositions[id];
+  if (pos.x === 1 && pos.y === 3) {
+    alert('クリアおめでとうございます！');
+  }
+}
+</script>
+</body>
+</html>
